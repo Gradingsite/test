@@ -1,0 +1,313 @@
+
+<h2 class="sr-only">Returnless qty monitor — live dashboard dat qty-veranderingen bijhoudt via de Returnless API</h2>
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); }
+.wrap { padding: 1.25rem 0; }
+.header { display: flex; align-items: center; gap: 12px; margin-bottom: 1.25rem; flex-wrap: wrap; }
+.title { font-size: 16px; font-weight: 500; color: var(--color-text-primary); }
+.badge { font-size: 12px; padding: 3px 10px; border-radius: 99px; border: 0.5px solid var(--color-border-tertiary); color: var(--color-text-secondary); }
+.badge.live { background: #EAF3DE; color: #3B6D11; border-color: #C0DD97; }
+.badge.stopped { background: var(--color-background-secondary); }
+.config { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; margin-bottom: 1.25rem; }
+.config input[type=text] { font-size: 13px; font-family: var(--font-mono); }
+.config select { font-size: 13px; }
+.btn { font-size: 13px; padding: 0 14px; height: 36px; white-space: nowrap; cursor: pointer; }
+.btn.start { background: var(--color-background-primary); color: var(--color-text-primary); }
+.btn.stop { background: var(--color-background-secondary); }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 1.25rem; }
+.stat { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 12px 14px; }
+.stat-label { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 4px; }
+.stat-val { font-size: 22px; font-weight: 500; color: var(--color-text-primary); }
+.log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.log-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary); }
+.clear-btn { font-size: 12px; color: var(--color-text-secondary); background: none; border: none; cursor: pointer; padding: 0; }
+.clear-btn:hover { color: var(--color-text-primary); }
+.feed { border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); overflow: hidden; }
+.feed-empty { padding: 2rem; text-align: center; font-size: 13px; color: var(--color-text-tertiary); }
+.event { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; padding: 10px 14px; border-bottom: 0.5px solid var(--color-border-tertiary); }
+.event:last-child { border-bottom: none; }
+.event:nth-child(even) { background: var(--color-background-secondary); }
+.evt-time { font-size: 11px; font-family: var(--font-mono); color: var(--color-text-tertiary); white-space: nowrap; padding-top: 1px; }
+.evt-body { font-size: 13px; color: var(--color-text-primary); }
+.evt-return { font-weight: 500; }
+.evt-sku { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; }
+.evt-qty { font-size: 13px; font-weight: 500; white-space: nowrap; }
+.qty-up { color: #3B6D11; }
+.qty-down { color: #A32D2D; }
+.qty-new { color: #185FA5; }
+.err { font-size: 12px; color: var(--color-text-danger); background: var(--color-background-danger); border: 0.5px solid var(--color-border-danger); border-radius: var(--border-radius-md); padding: 8px 12px; margin-bottom: 1rem; display: none; }
+.pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #63C459; margin-right: 6px; animation: pulse 1.4s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+</style>
+
+<div class="wrap">
+  <div class="header">
+    <span class="title">Returnless qty monitor</span>
+    <span class="badge stopped" id="status-badge">Gestopt</span>
+  </div>
+
+  <div class="config">
+    <input type="text" id="api-key" placeholder="Jouw Returnless API key..." />
+    <select id="interval">
+      <option value="5000">elke 5s</option>
+      <option value="10000" selected>elke 10s</option>
+      <option value="30000">elke 30s</option>
+      <option value="60000">elke 60s</option>
+    </select>
+    <button class="btn start" id="toggle-btn" onclick="togglePolling()">▶ Start</button>
+  </div>
+
+  <div class="config">
+    <input type="text" id="watch-id" placeholder="returnorder_... id (uit de panel-URL) — volg 1 retour direct" />
+    <button class="btn" id="check-btn" onclick="checkOne()">Check nu</button>
+  </div>
+
+  <div class="err" id="err-box"></div>
+  <div id="diag" style="font-size:12px;font-family:var(--font-mono);color:var(--color-text-secondary);margin-bottom:1rem;"></div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-label">Wijzigingen gezien</div>
+      <div class="stat-val" id="stat-changes">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Polls uitgevoerd</div>
+      <div class="stat-val" id="stat-polls">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Returns gevolgd</div>
+      <div class="stat-val" id="stat-returns">0</div>
+    </div>
+  </div>
+
+  <div class="log-header">
+    <span class="log-title">Live qty-veranderingen</span>
+    <button class="clear-btn" onclick="clearFeed()">Wissen</button>
+  </div>
+  <div class="feed" id="feed">
+    <div class="feed-empty" id="feed-empty">Vul je API key in en klik Start</div>
+  </div>
+</div>
+
+<script>
+const BASE = 'https://api-v2.returnless.com';
+let polling = false;
+let timer = null;
+let knownQty = {};
+let lastUpdate = {};          // returnId -> updated_at (alleen gewijzigde retouren ophalen)
+let sortSupported = true;
+let statChanges = 0;
+let statPolls = 0;
+let trackedReturns = new Set();
+
+// De lijst bevat requests én echte returns; alleen bij returns gaat quantity_received omhoog.
+function isActualReturn(r) {
+  const s = String(r.current_state || '');
+  if (s) return s.startsWith('return');
+  return String(r.links?.panel || '').includes('/returns/');
+}
+
+async function apiGet(key, path) {
+  const res = await fetch(`${BASE}/${path.replace(BASE, '').replace(/^\/+/, '')}`, {
+    headers: { 'Authorization': 'Bearer ' + key, 'Accept': 'application/json' }
+  });
+  const txt = await res.text();
+  if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + txt.slice(0, 120));
+  return txt ? JSON.parse(txt) : null;
+}
+
+// Lijst op updated_at aflopend (zodat elk gewijzigd retour bovenaan springt), met veilige fallback.
+async function fetchOrders(key) {
+  if (sortSupported) {
+    try { return await apiGet(key, '2025-01/return-orders?sort=-updated_at'); }
+    catch { sortSupported = false; }
+  }
+  return await apiGet(key, '2025-01/return-orders');
+}
+
+function showErr(msg) {
+  const b = document.getElementById('err-box');
+  b.style.display = msg ? 'block' : 'none';
+  b.textContent = msg || '';
+}
+
+function togglePolling() {
+  if (polling) stopPolling(); else startPolling();
+}
+
+function startPolling() {
+  const key = document.getElementById('api-key').value.trim();
+  if (!key) { showErr('Vul eerst je API key in.'); return; }
+  showErr('');
+  polling = true;
+  document.getElementById('toggle-btn').textContent = '⏹ Stop';
+  document.getElementById('toggle-btn').classList.remove('start');
+  document.getElementById('toggle-btn').classList.add('stop');
+  const badge = document.getElementById('status-badge');
+  badge.className = 'badge live';
+  badge.innerHTML = '<span class="pulse"></span>Live';
+  poll();
+  const interval = parseInt(document.getElementById('interval').value);
+  timer = setInterval(poll, interval);
+}
+
+function stopPolling() {
+  polling = false;
+  clearInterval(timer);
+  document.getElementById('toggle-btn').textContent = '▶ Start';
+  document.getElementById('toggle-btn').classList.remove('stop');
+  document.getElementById('toggle-btn').classList.add('start');
+  const badge = document.getElementById('status-badge');
+  badge.className = 'badge stopped';
+  badge.textContent = 'Gestopt';
+}
+
+// Volg 1 specifiek retour direct via z'n id — geen lijst, geen sort, geen statusfilter.
+// Pel het returnorder_-id uit wat de gebruiker plakt (RE-nummer/los id/hele panel-URL).
+function extractReturnId(input) {
+  const m = String(input).match(/returnorder_[A-Za-z0-9]+/);
+  return m ? m[0] : String(input).trim();
+}
+
+async function fetchItemsForId(key, rawId) {
+  const id = extractReturnId(rawId);
+  // Haal het retour zelf op en gebruik z'n eigen items-link (geen aanname over het pad).
+  const ro = await apiGet(key, `2025-01/return-orders/${id}`);
+  const r = ro?.data || ro;
+  const link = r?.links?.return_order_items;
+  if (!link) throw new Error('Retour gevonden maar geen items-link erop.');
+  const idata = await apiGet(key, link);
+  return idata?.data || (Array.isArray(idata) ? idata : []);
+}
+
+async function checkOne() {
+  const key = document.getElementById('api-key').value.trim();
+  const raw = document.getElementById('watch-id').value.trim();
+  if (!key) { showErr('Vul eerst je API key in.'); return; }
+  if (!raw) { showErr('Plak een returnorder_-id (uit de panel-URL).'); return; }
+  const id = extractReturnId(raw);
+  if (!id.startsWith('returnorder_')) {
+    showErr('Dit lijkt geen returnorder_-id. Pak het uit de panel-URL: panel.returnless.com/returns/returnorder_XXXX (niet het RE-nummer).');
+    return;
+  }
+  try {
+    const items = await fetchItemsForId(key, id);
+    showErr('');
+    if (!items.length) { document.getElementById('diag').textContent = 'Geen items gevonden voor dit id — klopt het id?'; return; }
+    items.forEach(item => {
+      const iid = id + '_' + item.id;
+      const label = item.sales_order_item_external_id || item.id;
+      checkChange(iid + '_received', item.quantity_received ?? null, id, label, 'ontvangen');
+    });
+    const summary = items.map(it => `${it.sales_order_item_external_id || it.id}: ontvangen ${it.quantity_received}/${it.quantity}`).join('  ·  ');
+    document.getElementById('diag').textContent = `Huidige stand (${new Date().toLocaleTimeString('nl-NL')}): ${summary}`;
+  } catch (e) {
+    showErr('Fout: ' + e.message);
+  }
+}
+
+async function poll() {
+  const key = document.getElementById('api-key').value.trim();
+  statPolls++;
+  document.getElementById('stat-polls').textContent = statPolls;
+
+  // Als er een specifiek retour wordt gevolgd: dat ALTIJD checken (los van lijst/sort/filter).
+  const watchId = document.getElementById('watch-id').value.trim();
+  if (watchId) {
+    try {
+      const items = await fetchItemsForId(key, watchId);
+      items.forEach(item => {
+        const iid = watchId + '_' + item.id;
+        const label = item.sales_order_item_external_id || item.id;
+        checkChange(iid + '_received', item.quantity_received ?? null, watchId, label, 'ontvangen');
+      });
+      trackedReturns.add(watchId);
+    } catch (e) { showErr('Watch-fout: ' + e.message); }
+  }
+
+  try {
+    const json = await fetchOrders(key);
+    const orders = (json.data || []).filter(isActualReturn);
+    // Diagnostiek: zie je hier 200 returns en een aflopende updated_at, dan werkt de sort.
+    const top = (json.data || [])[0];
+    document.getElementById('diag').textContent =
+      `Poll #${statPolls}: ${ (json.data||[]).length } records · ${orders.length} echte returns · sort=${sortSupported?'aan':'UIT (genegeerd)'} · nieuwste updated_at: ${top?.updated_at || '—'}`;
+
+    for (const order of orders) {
+      const rid = order.id;
+      const rnum = order.return_number || rid;
+      trackedReturns.add(rid);
+
+      // Alleen voor nieuwe of gewijzigde retouren de items ophalen (qty zit niet inline).
+      const changed = lastUpdate[rid] && order.updated_at && lastUpdate[rid] !== order.updated_at;
+      const isNew = !(rid in lastUpdate);
+      if (changed || isNew) {
+        let items = [];
+        try {
+          const idata = await apiGet(key, order.links?.return_order_items || '');
+          items = idata?.data || (Array.isArray(idata) ? idata : []);
+        } catch (e) { /* items niet beschikbaar -> overslaan */ }
+
+        items.forEach(item => {
+          const iid = rid + '_' + item.id;
+          const label = item.sales_order_item_external_id || item.id;
+          checkChange(iid + '_received', item.quantity_received ?? null, rnum, label, 'ontvangen');
+          checkChange(iid + '_stock', item.quantity_back_in_stock ?? null, rnum, label, 'back-to-stock');
+        });
+      }
+      lastUpdate[rid] = order.updated_at;
+    }
+    showErr('');
+    document.getElementById('stat-returns').textContent = trackedReturns.size;
+  } catch(e) {
+    showErr('Fout: ' + e.message + ' (CORS kan meespelen bij directe browser-aanroepen)');
+  }
+}
+
+function checkChange(key, newVal, returnNum, sku, type) {
+  if (newVal === null || newVal === undefined) return;
+  if (!(key in knownQty)) {
+    knownQty[key] = newVal;
+    return;
+  }
+  const old = knownQty[key];
+  if (old !== newVal) {
+    knownQty[key] = newVal;
+    addEvent(returnNum, sku, type, old, newVal);
+  }
+}
+
+function addEvent(returnNum, sku, type, oldVal, newVal) {
+  statChanges++;
+  document.getElementById('stat-changes').textContent = statChanges;
+  const feed = document.getElementById('feed');
+  const empty = document.getElementById('feed-empty');
+  if (empty) empty.remove();
+  const now = new Date();
+  const time = now.toLocaleTimeString('nl-NL', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  const diff = newVal - oldVal;
+  const cls = diff > 0 ? 'qty-up' : diff < 0 ? 'qty-down' : 'qty-new';
+  const arrow = diff > 0 ? '↑' : diff < 0 ? '↓' : '→';
+  const el = document.createElement('div');
+  el.className = 'event';
+  el.innerHTML = `
+    <span class="evt-time">${time}</span>
+    <div class="evt-body">
+      <div class="evt-return">${returnNum}</div>
+      <div class="evt-sku">${sku} · ${type}</div>
+    </div>
+    <span class="evt-qty ${cls}">${arrow} ${oldVal} → ${newVal}</span>
+  `;
+  feed.insertBefore(el, feed.firstChild);
+  if (feed.children.length > 100) feed.removeChild(feed.lastChild);
+}
+
+function clearFeed() {
+  const feed = document.getElementById('feed');
+  feed.innerHTML = '<div class="feed-empty" id="feed-empty">Feed gewist — wacht op nieuwe wijzigingen...</div>';
+  statChanges = 0;
+  document.getElementById('stat-changes').textContent = 0;
+}
+</script>
